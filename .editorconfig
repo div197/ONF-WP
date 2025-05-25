@@ -1,0 +1,83 @@
+# ONF-WP v1.0.0-Alpha - EditorConfig
+# Consistent coding standards across all editors and IDEs
+
+root = true
+
+# Default settings for all files
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# PHP files
+[*.php]
+indent_size = 4
+max_line_length = 120
+
+# JavaScript and TypeScript
+[*.{js,ts,jsx,tsx}]
+indent_size = 2
+max_line_length = 100
+
+# CSS and SCSS
+[*.{css,scss,sass,less}]
+indent_size = 2
+max_line_length = 120
+
+# HTML and template files
+[*.{html,htm,twig,blade.php}]
+indent_size = 2
+max_line_length = 120
+
+# YAML files (Docker Compose, GitHub Actions, etc.)
+[*.{yml,yaml}]
+indent_size = 2
+max_line_length = 120
+
+# JSON files
+[*.json]
+indent_size = 2
+max_line_length = 120
+
+# Markdown files
+[*.{md,markdown}]
+trim_trailing_whitespace = false
+max_line_length = 120
+
+# Shell scripts
+[*.{sh,bash,zsh}]
+indent_size = 2
+max_line_length = 120
+
+# Dockerfile
+[Dockerfile*]
+indent_size = 2
+max_line_length = 120
+
+# Makefile (must use tabs)
+[{Makefile,*.mk}]
+indent_style = tab
+indent_size = 4
+
+# Environment files
+[.env*]
+indent_size = 2
+max_line_length = 120
+
+# Configuration files
+[*.{ini,conf,cfg}]
+indent_size = 2
+max_line_length = 120
+
+# SQL files
+[*.sql]
+indent_size = 2
+max_line_length = 120
+
+# XML files
+[*.xml]
+indent_size = 2
+max_line_length = 120 

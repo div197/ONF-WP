@@ -1,0 +1,121 @@
+{
+  "name": "ONF-WP v1.0.0-Alpha Development Environment",
+  "dockerComposeFile": "../deployments/docker-compose/docker-compose.dev.yml",
+  "service": "php",
+  "workspaceFolder": "/var/www/html",
+  "shutdownAction": "stopCompose",
+  
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.vscode-docker",
+        "ms-azuretools.vscode-docker",
+        "bmewburn.vscode-intelephense-client",
+        "xdebug.php-debug",
+        "formulahendry.auto-rename-tag",
+        "bradlc.vscode-tailwindcss",
+        "ms-vscode.makefile-tools",
+        "redhat.vscode-yaml",
+        "ms-vscode.vscode-json",
+        "esbenp.prettier-vscode",
+        "ms-vscode.vscode-typescript-next",
+        "github.copilot",
+        "github.copilot-chat",
+        "ms-vscode.remote-containers"
+      ],
+      
+      "settings": {
+        "php.suggest.basic": false,
+        "php.validate.enable": false,
+        "intelephense.files.maxSize": 5000000,
+        "intelephense.environment.includePaths": [
+          "/var/www/html"
+        ],
+        "intelephense.diagnostics.undefinedFunctions": false,
+        "intelephense.diagnostics.undefinedConstants": false,
+        "intelephense.diagnostics.undefinedClassConstants": false,
+        "intelephense.diagnostics.undefinedMethods": false,
+        "intelephense.diagnostics.undefinedProperties": false,
+        "intelephense.diagnostics.undefinedTypes": false,
+        
+        "files.associations": {
+          "*.php": "php",
+          "*.yml": "yaml",
+          "*.yaml": "yaml",
+          "Dockerfile*": "dockerfile",
+          "docker-compose*": "yaml",
+          ".env*": "properties"
+        },
+        
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+          "source.fixAll": true
+        },
+        
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "terminal.integrated.profiles.linux": {
+          "bash": {
+            "path": "/bin/bash"
+          }
+        },
+        
+        "docker.defaultRegistryPath": "onf-wp",
+        "docker.dockerPath": "docker",
+        "docker.dockerComposePath": "docker-compose"
+      }
+    }
+  },
+  
+  "forwardPorts": [80, 443, 3306, 6379, 8080, 9000],
+  "portsAttributes": {
+    "80": {
+      "label": "HTTP",
+      "onAutoForward": "notify"
+    },
+    "443": {
+      "label": "HTTPS",
+      "onAutoForward": "notify"
+    },
+    "3306": {
+      "label": "MariaDB",
+      "onAutoForward": "silent"
+    },
+    "6379": {
+      "label": "Redis",
+      "onAutoForward": "silent"
+    },
+    "8080": {
+      "label": "Traefik Dashboard",
+      "onAutoForward": "notify"
+    },
+    "9000": {
+      "label": "PHP-FPM",
+      "onAutoForward": "silent"
+    }
+  },
+  
+  "postCreateCommand": "echo '🍊 ONF-WP v1.0.0-Alpha Development Environment Ready!' && echo 'Run: ./onf-wp setup to initialize the project'",
+  
+  "remoteUser": "wodby",
+  
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": true,
+      "installOhMyZsh": true,
+      "upgradePackages": true
+    },
+    "ghcr.io/devcontainers/features/git:1": {
+      "ppa": true,
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "nodeGypDependencies": true,
+      "version": "lts"
+    }
+  },
+  
+  "mounts": [
+    "source=${localWorkspaceFolder}/storage,target=/var/www/html,type=bind,consistency=cached"
+  ]
+} 

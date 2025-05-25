@@ -1,0 +1,416 @@
+# ONF-WP v1.0.0-Alpha - Revolutionary Docker Volume Strategy
+# 100% Docker Volumes - Maximum Performance & Cross-Platform Portability
+
+version: '3.8'
+
+networks:
+  onf_web:
+    name: "onf_web_${COMPOSE_PROJECT_NAME}"
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "172.${DOCKER_SUBNET_THIRD_OCTET:-20}.0.0/16"
+  onf_internal:
+    name: "onf_internal_${COMPOSE_PROJECT_NAME}"
+    driver: bridge
+    internal: true
+
+volumes:
+  # WordPress Core & Content (Docker Volumes for Performance)
+  wp_core:
+    name: "wp_core_${COMPOSE_PROJECT_NAME}"
+    driver: ${ONF_VOLUME_DRIVER:-local}
+  
+  wp_uploads:
+    name: "wp_uploads_${COMPOSE_PROJECT_NAME}"
+    driver: ${ONF_VOLUME_DRIVER:-local}
+  
+  wp_themes:
+    name: "wp_themes_${COMPOSE_PROJECT_NAME}"
+    driver: ${ONF_VOLUME_DRIVER:-local}
+  
+  wp_plugins:
+    name: "wp_plugins_${COMPOSE_PROJECT_NAME}"
+    driver: ${ONF_VOLUME_DRIVER:-local}
+
+  # Database & Cache
+  mariadb_data:
+    name: "mariadb_data_${COMPOSE_PROJECT_NAME}"
+    driver: ${ONF_VOLUME_DRIVER:-local}
+  
+  redis_data:
+    name: "redis_data_${COMPOSE_PROJECT_NAME}"
+    driver: ${ONF_VOLUME_DRIVER:-local}
+
+  # Logs & Configuration
+  logs:
+    name: "logs_${COMPOSE_PROJECT_NAME}"
+    driver: ${ONF_VOLUME_DRIVER:-local}
+
+services:
+  # WordPress Initialization Service (Permission-Perfect)
+  wordpress-init:
+    image: wordpress:cli
+    container_name: "${COMPOSE_PROJECT_NAME}_wordpress_init"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: mariadb
+      WORDPRESS_DB_NAME: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_USER: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_PASSWORD: "${DB_PASSWORD:-secure_dev_password_${COMPOSE_PROJECT_NAME}}"
+      WORDPRESS_TABLE_PREFIX: "wp_${COMPOSE_PROJECT_NAME}_"
+    volumes:
+      - wp_core:/var/www/html
+    user: "33:33"  # www-data user for proper permissions
+    command: >
+      sh -c "
+        echo '🚀 ONF-WP WordPress Initialization Starting (Permission-Perfect)...'
+        
+        # Wait for database
+        until wp db check --allow-root 2>/dev/null; do
+          echo 'Waiting for database...'
+          sleep 5
+        done
+        
+        # Download WordPress if not present
+        if [ ! -f /var/www/html/wp-config.php ]; then
+          echo '📥 Downloading WordPress...'
+          wp core download --allow-root --path=/var/www/html --force
+          
+          echo '🔧 Configuring WordPress...'
+          wp config create --allow-root \
+            --dbname='${COMPOSE_PROJECT_NAME}' \
+            --dbuser='${COMPOSE_PROJECT_NAME}' \
+            --dbpass='${DB_PASSWORD:-secure_dev_password_${COMPOSE_PROJECT_NAME}}' \
+            --dbhost='mariadb' \
+            --dbprefix='wp_${COMPOSE_PROJECT_NAME}_' \
+            --path=/var/www/html \
+            --force
+          
+          # Create essential directories
+          mkdir -p /var/www/html/wp-content/themes
+          mkdir -p /var/www/html/wp-content/plugins
+          mkdir -p /var/www/html/wp-content/uploads
+          
+          echo '✅ WordPress initialization complete (no permission issues)!'
+        else
+          echo '✅ WordPress already configured'
+        fi
+        
+        echo '🎉 ONF-WP Docker WordPress Ready!'
+      "
+    restart: "no"
+
+  # Redis Cache
+  redis:
+    image: redis:7.2-alpine
+    container_name: "${COMPOSE_PROJECT_NAME}_redis"
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory ${REDIS_MAX_MEMORY:-256mb}
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --appendonly yes
+      --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    networks:
+      - onf_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # MariaDB Database
+  mariadb:
+    image: mariadb:11.4
+    container_name: "${COMPOSE_PROJECT_NAME}_mariadb"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      MYSQL_DATABASE: "${COMPOSE_PROJECT_NAME}"
+      MYSQL_USER: "${COMPOSE_PROJECT_NAME}"
+      MYSQL_PASSWORD: "${DB_PASSWORD:-secure_dev_password_${COMPOSE_PROJECT_NAME}}"
+      MYSQL_ROOT_PASSWORD: "${DB_ROOT_PASSWORD:-secure_dev_root_password_${COMPOSE_PROJECT_NAME}}"
+      MYSQL_INNODB_BUFFER_POOL_SIZE: "256M"
+      MYSQL_INNODB_LOG_FILE_SIZE: "64M"
+      MYSQL_MAX_CONNECTIONS: "100"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - logs:/var/log/mysql
+    networks:
+      - onf_internal
+    ports:
+      - "${MARIADB_PORT_FORWARD:-3306}:3306"
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "--user=${COMPOSE_PROJECT_NAME}", "--password=${DB_PASSWORD:-secure_dev_password_${COMPOSE_PROJECT_NAME}}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # PHP-FPM Application Server
+  php:
+    build:
+      context: ../../
+      dockerfile: build/php/Dockerfile.dev
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: "onf-wp-php:${COMPOSE_PROJECT_NAME}"
+    container_name: "${COMPOSE_PROJECT_NAME}_php"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      wordpress-init:
+        condition: service_completed_successfully
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME}"
+      TRAEFIK_HTTPS_PORT: "${TRAEFIK_HTTPS_PORT}"
+      
+      # Database Configuration
+      DB_HOST: mariadb
+      WORDPRESS_DB_HOST: mariadb
+      DB_NAME: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_NAME: "${COMPOSE_PROJECT_NAME}"
+      DB_USER: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_USER: "${COMPOSE_PROJECT_NAME}"
+      DB_PASSWORD: "${DB_PASSWORD:-secure_dev_password_${COMPOSE_PROJECT_NAME}}"
+      WORDPRESS_DB_PASSWORD: "${DB_PASSWORD:-secure_dev_password_${COMPOSE_PROJECT_NAME}}"
+      
+      # WordPress Configuration
+      WORDPRESS_TABLE_PREFIX: "wp_${COMPOSE_PROJECT_NAME}_"
+      PROJECT_DOMAIN: "${PROJECT_DOMAIN}"
+      WORDPRESS_SITE_URL: "https://${PROJECT_DOMAIN}"
+      WORDPRESS_HOME_URL: "https://${PROJECT_DOMAIN}"
+      WORDPRESS_TRUST_X_FORWARDED_PROTO: "true"
+      
+      # Performance Settings
+      PHP_MEMORY_LIMIT: "${ONF_PHP_MEMORY_LIMIT:-512M}"
+      PHP_MAX_EXECUTION_TIME: "${ONF_PHP_MAX_EXECUTION_TIME:-300}"
+      
+      # Redis Configuration
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      
+      # Development Settings
+      WP_ENV: "${WP_ENV:-development}"
+      WP_DEBUG: "${WP_DEBUG:-true}"
+      WP_DEBUG_LOG: "${WP_DEBUG_LOG:-true}"
+      WP_DEBUG_DISPLAY: "${WP_DEBUG_DISPLAY:-false}"
+      
+      # ONF-WP Revolutionary Settings
+      ONF_VOLUME_STRATEGY: "${ONF_VOLUME_STRATEGY:-docker}"
+      ONF_VERSION: "${ONF_VERSION:-1.0.0-Alpha-Docker}"
+    volumes:
+      # WordPress Core (Docker Volume)
+      - wp_core:/var/www/html
+      # Uploads (Docker Volume)
+      - wp_uploads:/var/www/html/wp-content/uploads
+      # Themes (Docker Volume)
+      - wp_themes:/var/www/html/wp-content/themes
+      # Plugins (Docker Volume)  
+      - wp_plugins:/var/www/html/wp-content/plugins
+      # Logs
+      - logs:/var/log/php
+    networks:
+      - onf_internal
+      - onf_web
+    healthcheck:
+      test: ["CMD-SHELL", "php-fpm-healthcheck || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Nginx Web Server
+  nginx:
+    image: wodby/nginx:latest
+    container_name: "${COMPOSE_PROJECT_NAME}_nginx"
+    restart: unless-stopped
+    depends_on:
+      php:
+        condition: service_healthy
+    environment:
+      NGINX_VHOST_PRESET: wordpress
+      NGINX_BACKEND_HOST: php
+      NGINX_SERVER_ROOT: /var/www/html
+      NGINX_WORKER_PROCESSES: "${ONF_NGINX_WORKER_PROCESSES:-auto}"
+    volumes:
+      # Same volumes as PHP for serving static files
+      - wp_core:/var/www/html:ro
+      - wp_uploads:/var/www/html/wp-content/uploads:ro
+      - wp_themes:/var/www/html/wp-content/themes:ro
+      - wp_plugins:/var/www/html/wp-content/plugins:ro
+      - logs:/var/log/nginx
+    networks:
+      - onf_internal
+      - onf_web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=onf_web_${COMPOSE_PROJECT_NAME}"
+      
+      # HTTP Router
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_http.rule=Host(`${PROJECT_DOMAIN}`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_http.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_http.service=${COMPOSE_PROJECT_NAME}_nginx_service"
+      
+      # HTTPS Router
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_https.rule=Host(`${PROJECT_DOMAIN}`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_https.entrypoints=websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_https.tls=true"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_https.service=${COMPOSE_PROJECT_NAME}_nginx_service"
+      
+      # Service Definition
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}_nginx_service.loadbalancer.server.port=80"
+
+  # WP-CLI Management
+  wpcli:
+    image: wordpress:cli
+    container_name: "${COMPOSE_PROJECT_NAME}_wpcli"
+    depends_on:
+      php:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: mariadb
+      WORDPRESS_DB_NAME: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_USER: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_PASSWORD: "${DB_PASSWORD:-secure_dev_password_${COMPOSE_PROJECT_NAME}}"
+      WORDPRESS_TABLE_PREFIX: "wp_${COMPOSE_PROJECT_NAME}_"
+    volumes:
+      - wp_core:/var/www/html
+      - wp_uploads:/var/www/html/wp-content/uploads
+      - wp_themes:/var/www/html/wp-content/themes
+      - wp_plugins:/var/www/html/wp-content/plugins
+    networks:
+      - onf_internal
+    command: tail -f /dev/null
+
+  # Development Sync Service (Optional)
+  dev-sync:
+    image: alpine:latest
+    container_name: "${COMPOSE_PROJECT_NAME}_dev_sync"
+    restart: unless-stopped
+    profiles:
+      - sync
+    volumes:
+      # Container volumes
+      - wp_themes:/container/themes
+      - wp_plugins:/container/plugins
+      # Host directories (for development)
+      - ../../development/themes:/host/themes
+      - ../../development/plugins:/host/plugins
+    command: >
+      sh -c "
+        echo '🔄 ONF-WP Development Sync Service Starting...'
+        apk add --no-cache rsync inotify-tools
+        
+        # Initial sync from container to host (if host is empty)
+        if [ '${ONF_DEV_THEMES_SYNC}' = 'true' ] && [ -z \"\$(ls -A /host/themes 2>/dev/null)\" ]; then
+          echo '📥 Initial themes sync: container → host'
+          rsync -av /container/themes/ /host/themes/
+        fi
+        
+        if [ '${ONF_DEV_PLUGINS_SYNC}' = 'true' ] && [ -z \"\$(ls -A /host/plugins 2>/dev/null)\" ]; then
+          echo '📥 Initial plugins sync: container → host'
+          rsync -av /container/plugins/ /host/plugins/
+        fi
+        
+        # Continuous bidirectional sync
+        echo '🔄 Starting continuous sync...'
+        while true; do
+          if [ '${ONF_DEV_THEMES_SYNC}' = 'true' ]; then
+            rsync -av --exclude='.git' /host/themes/ /container/themes/
+            rsync -av --exclude='.git' /container/themes/ /host/themes/
+          fi
+          
+          if [ '${ONF_DEV_PLUGINS_SYNC}' = 'true' ]; then
+            rsync -av --exclude='.git' /host/plugins/ /container/plugins/
+            rsync -av --exclude='.git' /container/plugins/ /host/plugins/
+          fi
+          
+          sleep 5
+        done
+      "
+
+  # Cron Service
+  crond:
+    image: wodby/wordpress:latest
+    container_name: "${COMPOSE_PROJECT_NAME}_crond"
+    init: true
+    restart: unless-stopped
+    depends_on:
+      php:
+        condition: service_healthy
+    environment:
+      CRONTAB_SCHEDULE: "0 * * * *"
+      CRONTAB_COMMAND: "wp cron event run --due-now --path=/var/www/html"
+      WORDPRESS_DB_HOST: mariadb
+      WORDPRESS_DB_NAME: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_USER: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_PASSWORD: "${DB_PASSWORD:-secure_dev_password_${COMPOSE_PROJECT_NAME}}"
+      WORDPRESS_TABLE_PREFIX: "wp_${COMPOSE_PROJECT_NAME}_"
+    volumes:
+      - wp_core:/var/www/html
+    networks:
+      - onf_internal
+    entrypoint: ["sudo", "crond", "-f", "-L", "/dev/stdout"]
+
+  # Database Management (Adminer)
+  adminer:
+    image: wodby/adminer:latest
+    container_name: "${COMPOSE_PROJECT_NAME}_adminer"
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_DB_DRIVER: mysql
+      ADMINER_DEFAULT_DB_HOST: mariadb
+      ADMINER_DEFAULT_DB_NAME: "${COMPOSE_PROJECT_NAME}"
+    networks:
+      - onf_internal
+      - onf_web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=onf_web_${COMPOSE_PROJECT_NAME}"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_adminer.rule=Host(`db.${PROJECT_DOMAIN}`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_adminer.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_adminer.service=${COMPOSE_PROJECT_NAME}_adminer_service"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}_adminer_service.loadbalancer.server.port=80"
+
+  # Traefik Reverse Proxy
+  traefik:
+    image: traefik:v3.0
+    container_name: "${COMPOSE_PROJECT_NAME}_traefik"
+    restart: unless-stopped
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=onf_web_${COMPOSE_PROJECT_NAME}"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--log.level=${ONF_LOGGING_LEVEL:-info}"
+    ports:
+      - "${TRAEFIK_HTTP_PORT:-8000}:80"
+      - "${TRAEFIK_HTTPS_PORT:-8443}:443"
+      - "${TRAEFIK_WEBUI_PORT:-8081}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - logs:/var/log/traefik
+    networks:
+      - onf_web
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s 

@@ -1,0 +1,35 @@
+# ONF-WP Docker Build Context Optimization
+# Only include essential files for building the PHP container
+
+# Exclude everything by default, then explicitly include what we need
+*
+
+# Include only essential files for PHP container build
+!onf-wp-entrypoint.sh
+!wp-config-onf-sample.php
+
+# Explicitly exclude large/unnecessary directories and files
+.git/
+.github/
+wordpress/
+node_modules/
+.env
+.env.*
+README.md
+CHANGELOG.md
+ONF-vs-competitors.md
+LICENSE.md
+*.md
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+docker-compose.yml
+
+# Exclude any development/temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old 

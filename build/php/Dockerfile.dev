@@ -1,0 +1,32 @@
+# ONF-WP Custom PHP Container
+# Optimized for security, performance, and Windows compatibility
+FROM wodby/wordpress:latest
+
+# Set labels for better image management
+LABEL maintainer="Orange Network Foundation <info@orangenetwork.foundation>"
+LABEL version="1.0.3"
+LABEL description="ONF-WP Custom PHP Container with integrated entrypoint"
+
+# Copy essential files directly to appropriate locations with proper ownership
+# Switch to root user temporarily for file operations
+USER root
+
+# Copy files and fix any Windows line ending issues
+COPY ../../scripts/development/entrypoint.dev.sh /tmp/onf-wp-entrypoint.sh
+COPY ../../templates/wordpress/wp-config.dev.php /var/www/html/wp-config-onf-sample.php
+
+# Fix line endings and install script with proper permissions  
+RUN sed -i 's/\r$//' /tmp/onf-wp-entrypoint.sh && \
+    cp /tmp/onf-wp-entrypoint.sh /usr/local/bin/onf-wp-entrypoint.sh && \
+    chmod +x /usr/local/bin/onf-wp-entrypoint.sh && \
+    chown wodby:wodby /usr/local/bin/onf-wp-entrypoint.sh /var/www/html/wp-config-onf-sample.php && \
+    rm /tmp/onf-wp-entrypoint.sh
+
+# Switch back to wodby user for security
+USER wodby
+
+# Ensure proper working directory
+WORKDIR /var/www/html
+
+# Use explicit shell form to handle any remaining compatibility issues
+ENTRYPOINT ["/bin/sh", "/usr/local/bin/onf-wp-entrypoint.sh"] 

@@ -1,0 +1,239 @@
+# ONF-WP v1.0.5 - Production-Grade PHP Container
+# Revolutionary WordPress hosting with enterprise-level performance and security
+
+ARG PHP_VERSION=8.3
+FROM php:${PHP_VERSION}-fpm-alpine3.19
+
+# Build arguments
+ARG COMPOSER_VERSION=2.7
+ARG BUILD_DATE
+ARG VCS_REF
+
+# Metadata labels
+LABEL maintainer="Orange Network Foundation <info@orangenetwork.foundation>" \
+      version="1.0.5" \
+      description="ONF-WP Production PHP Container - Enterprise WordPress Hosting" \
+      build-date=$BUILD_DATE \
+      vcs-ref=$VCS_REF \
+      php-version=$PHP_VERSION \
+      composer-version=$COMPOSER_VERSION
+
+# Install system dependencies and PHP extensions
+RUN set -eux; \
+    # Add community repository for additional packages
+    echo "https://dl-cdn.alpinelinux.org/alpine/v3.19/community" >> /etc/apk/repositories; \
+    \
+    # Install system packages
+    apk add --no-cache --virtual .build-deps \
+        $PHPIZE_DEPS \
+        freetype-dev \
+        imagemagick-dev \
+        libjpeg-turbo-dev \
+        libpng-dev \
+        libwebp-dev \
+        libxml2-dev \
+        libxslt-dev \
+        libzip-dev \
+        oniguruma-dev \
+        zlib-dev; \
+    \
+    apk add --no-cache \
+        curl \
+        freetype \
+        git \
+        imagemagick \
+        libjpeg-turbo \
+        libpng \
+        libwebp \
+        libxml2 \
+        libxslt \
+        libzip \
+        mysql-client \
+        nginx \
+        oniguruma \
+        redis \
+        supervisor \
+        wget \
+        zlib; \
+    \
+    # Configure and install PHP extensions
+    docker-php-ext-configure gd \
+        --with-freetype \
+        --with-jpeg \
+        --with-webp; \
+    \
+    # Install PHP extensions
+    docker-php-ext-install -j$(nproc) \
+        bcmath \
+        exif \
+        gd \
+        intl \
+        mysqli \
+        opcache \
+        pdo_mysql \
+        soap \
+        xsl \
+        zip; \
+    \
+    # Install PECL extensions
+    pecl install \
+        imagick \
+        redis \
+        xdebug; \
+    \
+    # Enable extensions
+    docker-php-ext-enable \
+        imagick \
+        redis; \
+    \
+    # Clean up build dependencies
+    apk del .build-deps; \
+    rm -rf /var/cache/apk/* /tmp/* /var/tmp/*
+
+# Install Composer
+RUN curl -sS https://getcomposer.org/installer | php -- \
+        --version=${COMPOSER_VERSION} \
+        --install-dir=/usr/local/bin \
+        --filename=composer; \
+    composer --version
+
+# Install WP-CLI
+RUN curl -O https://raw.githubusercontent.com/wp-cli/wp-cli/v2.10.0/phar/wp-cli.phar; \
+    chmod +x wp-cli.phar; \
+    mv wp-cli.phar /usr/local/bin/wp; \
+    wp --info --allow-root
+
+# Create application directory and user
+RUN addgroup -g 1000 -S onf-wp && \
+    adduser -u 1000 -D -S -G onf-wp onf-wp
+
+# Create necessary directories
+RUN mkdir -p \
+        /var/www/html \
+        /var/log/php \
+        /var/log/supervisor \
+        /var/cache/nginx \
+        /var/run/php-fpm \
+        /opt/onf-wp/config \
+        /opt/onf-wp/scripts; \
+    \
+    # Set proper ownership
+    chown -R onf-wp:onf-wp \
+        /var/www/html \
+        /var/log/php \
+        /var/run/php-fpm \
+        /opt/onf-wp
+
+# Copy configuration files
+COPY ../../configs/production/php/php.ini /usr/local/etc/php/php.ini
+COPY ../../configs/production/php/php-fpm.conf /usr/local/etc/php-fpm.d/www.conf
+COPY ../../configs/production/php/opcache.ini /usr/local/etc/php/conf.d/opcache.ini
+COPY ../../configs/production/monitoring/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Copy application files
+COPY --chown=onf-wp:onf-wp ../../scripts/deployment/entrypoint.prod.sh /opt/onf-wp/entrypoint.sh
+COPY --chown=onf-wp:onf-wp ../../templates/wordpress/wp-config.prod.php /opt/onf-wp/wp-config-sample.php
+COPY --chown=onf-wp:onf-wp ../../scripts/ /opt/onf-wp/scripts/
+
+# Set execute permissions
+RUN chmod +x /opt/onf-wp/entrypoint.sh /opt/onf-wp/scripts/*.sh
+
+# Install WordPress plugins for production optimization
+RUN mkdir -p /opt/onf-wp/plugins; \
+    cd /opt/onf-wp/plugins; \
+    \
+    # Redis Object Cache plugin
+    wget -q https://downloads.wordpress.org/plugin/redis-cache.3.0.1.zip; \
+    unzip -q redis-cache.3.0.1.zip; \
+    \
+    # WP Super Cache for additional caching
+    wget -q https://downloads.wordpress.org/plugin/wp-super-cache.1.12.1.zip; \
+    unzip -q wp-super-cache.1.12.1.zip; \
+    \
+    # Security plugin
+    wget -q https://downloads.wordpress.org/plugin/wordfence.7.11.5.zip; \
+    unzip -q wordfence.7.11.5.zip; \
+    \
+    # SEO optimization
+    wget -q https://downloads.wordpress.org/plugin/wordpress-seo.22.5.zip; \
+    unzip -q wordpress-seo.22.5.zip; \
+    \
+    # Performance monitoring
+    wget -q https://downloads.wordpress.org/plugin/query-monitor.3.15.0.zip; \
+    unzip -q query-monitor.3.15.0.zip; \
+    \
+    # Clean up
+    rm -f *.zip; \
+    chown -R onf-wp:onf-wp /opt/onf-wp/plugins
+
+# Create health check script
+RUN echo '#!/bin/sh\n\
+set -e\n\
+\n\
+# Check PHP-FPM process\n\
+if ! pgrep -f "php-fpm: master process" > /dev/null; then\n\
+    echo "PHP-FPM master process not running"\n\
+    exit 1\n\
+fi\n\
+\n\
+# Check PHP-FPM pool\n\
+if ! php-fpm-healthcheck; then\n\
+    echo "PHP-FPM healthcheck failed"\n\
+    exit 1\n\
+fi\n\
+\n\
+# Check WordPress installation\n\
+if [ -f /var/www/html/wp-config.php ]; then\n\
+    if ! wp core is-installed --allow-root --path=/var/www/html 2>/dev/null; then\n\
+        echo "WordPress not properly installed"\n\
+        exit 1\n\
+    fi\n\
+fi\n\
+\n\
+echo "Health check passed"\n\
+exit 0\n\
+' > /usr/local/bin/health-check.sh; \
+    chmod +x /usr/local/bin/health-check.sh
+
+# Install PHP-FPM healthcheck
+RUN wget -O /usr/local/bin/php-fpm-healthcheck \
+    https://raw.githubusercontent.com/renatomefi/php-fpm-healthcheck/master/php-fpm-healthcheck; \
+    chmod +x /usr/local/bin/php-fpm-healthcheck
+
+# Security hardening
+RUN # Remove unnecessary packages and files \
+    rm -rf \
+        /var/cache/apk/* \
+        /tmp/* \
+        /var/tmp/* \
+        /usr/src/* \
+        /root/.composer \
+        /root/.npm; \
+    \
+    # Secure sensitive files \
+    find /etc -type f -name "*.conf" -exec chmod 644 {} \; 2>/dev/null || true; \
+    find /etc -type f -name "*.cfg" -exec chmod 644 {} \; 2>/dev/null || true; \
+    \
+    # Create log files with proper permissions \
+    touch /var/log/php/error.log /var/log/php/access.log; \
+    chown onf-wp:onf-wp /var/log/php/*.log; \
+    chmod 644 /var/log/php/*.log
+
+# Switch to application user
+USER onf-wp
+
+# Set working directory
+WORKDIR /var/www/html
+
+# Expose PHP-FPM port
+EXPOSE 9000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=60s \
+    CMD /usr/local/bin/health-check.sh
+
+# Set entrypoint
+ENTRYPOINT ["/opt/onf-wp/entrypoint.sh"]
+
+# Default command
+CMD ["php-fpm", "-F"] 

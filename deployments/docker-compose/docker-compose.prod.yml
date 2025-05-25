@@ -1,0 +1,404 @@
+# ONF-WP v1.0.5 - Production-Ready WordPress Platform
+# Revolutionary architecture for true production hosting
+
+version: '3.8'
+
+networks:
+  onf_web:
+    name: "onf_web_${COMPOSE_PROJECT_NAME}"
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "172.${DOCKER_SUBNET_THIRD_OCTET:-20}.0.0/16"
+  onf_internal:
+    name: "onf_internal_${COMPOSE_PROJECT_NAME}"
+    driver: bridge
+    internal: true
+
+volumes:
+  mariadb_data:
+    name: "mariadb_data_${COMPOSE_PROJECT_NAME}"
+    driver: local
+  redis_data:
+    name: "redis_data_${COMPOSE_PROJECT_NAME}"
+    driver: local
+  wp_uploads:
+    name: "wp_uploads_${COMPOSE_PROJECT_NAME}"
+    driver: local
+  logs:
+    name: "logs_${COMPOSE_PROJECT_NAME}"
+    driver: local
+
+services:
+  # Redis - High-performance caching layer
+  redis:
+    image: redis:7.2-alpine
+    container_name: "${COMPOSE_PROJECT_NAME}_redis"
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory ${REDIS_MAX_MEMORY:-256mb}
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --appendonly yes
+      --appendfsync everysec
+    environment:
+      - REDIS_REPLICATION_MODE=master
+    volumes:
+      - redis_data:/data
+      - logs:/var/log/redis
+    networks:
+      - onf_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: ${REDIS_MAX_MEMORY:-256M}
+        reservations:
+          memory: 64M
+
+  # MariaDB - Optimized database with connection pooling
+  mariadb:
+    image: mariadb:11.4
+    container_name: "${COMPOSE_PROJECT_NAME}_mariadb"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      MYSQL_DATABASE: "${COMPOSE_PROJECT_NAME}"
+      MYSQL_USER: "${COMPOSE_PROJECT_NAME}"
+      MYSQL_PASSWORD: "${DB_PASSWORD}"
+      MYSQL_ROOT_PASSWORD: "${DB_ROOT_PASSWORD}"
+      # Production optimizations
+      MYSQL_INNODB_BUFFER_POOL_SIZE: "${DB_INNODB_BUFFER_POOL_SIZE:-256M}"
+      MYSQL_INNODB_LOG_FILE_SIZE: "64M"
+      MYSQL_INNODB_FLUSH_LOG_AT_TRX_COMMIT: "2"
+      MYSQL_INNODB_FLUSH_METHOD: "O_DIRECT"
+      MYSQL_MAX_CONNECTIONS: "${DB_MAX_CONNECTIONS:-100}"
+      MYSQL_QUERY_CACHE_SIZE: "32M"
+      MYSQL_QUERY_CACHE_TYPE: "1"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./config/mariadb/my.cnf:/etc/mysql/conf.d/production.cnf:ro
+      - logs:/var/log/mysql
+    networks:
+      - onf_internal
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "--user=${COMPOSE_PROJECT_NAME}", "--password=${DB_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: ${DB_MAX_MEMORY:-512M}
+        reservations:
+          memory: 256M
+
+  # PHP-FPM - Production-optimized with OpCache and security
+  php:
+    build:
+      context: ../../
+      dockerfile: build/php/Dockerfile.prod
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+        - PHP_VERSION=${PHP_VERSION:-8.3}
+        - COMPOSER_VERSION=${COMPOSER_VERSION:-2.7}
+    image: "onf-wp-php-prod:${COMPOSE_PROJECT_NAME}"
+    container_name: "${COMPOSE_PROJECT_NAME}_php"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # WordPress Configuration
+      WORDPRESS_DB_HOST: mariadb
+      WORDPRESS_DB_NAME: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_USER: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_PASSWORD: "${DB_PASSWORD}"
+      WORDPRESS_TABLE_PREFIX: "wp_${COMPOSE_PROJECT_NAME//-/_}_"
+      
+      # Domain and URLs
+      PROJECT_DOMAIN: "${PROJECT_DOMAIN}"
+      WORDPRESS_SITE_URL: "${SITE_PROTOCOL:-https}://${PROJECT_DOMAIN}"
+      WORDPRESS_HOME_URL: "${SITE_PROTOCOL:-https}://${PROJECT_DOMAIN}"
+      
+      # Performance optimizations
+      PHP_MEMORY_LIMIT: "${PHP_MEMORY_LIMIT:-512M}"
+      PHP_MAX_EXECUTION_TIME: "${PHP_MAX_EXECUTION_TIME:-300}"
+      PHP_MAX_INPUT_VARS: "${PHP_MAX_INPUT_VARS:-3000}"
+      PHP_POST_MAX_SIZE: "${PHP_POST_MAX_SIZE:-256M}"
+      PHP_UPLOAD_MAX_FILESIZE: "${PHP_UPLOAD_MAX_FILESIZE:-256M}"
+      
+      # OpCache settings
+      PHP_OPCACHE_ENABLE: "1"
+      PHP_OPCACHE_MEMORY_CONSUMPTION: "${PHP_OPCACHE_MEMORY:-256}"
+      PHP_OPCACHE_MAX_ACCELERATED_FILES: "20000"
+      PHP_OPCACHE_VALIDATE_TIMESTAMPS: "${PHP_OPCACHE_VALIDATE:-0}"
+      PHP_OPCACHE_REVALIDATE_FREQ: "0"
+      
+      # Redis cache
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      REDIS_DATABASE: "0"
+      
+      # Security
+      PHP_EXPOSE_PHP: "Off"
+      PHP_ALLOW_URL_FOPEN: "Off"
+      PHP_ALLOW_URL_INCLUDE: "Off"
+      
+      # Development vs Production
+      WP_ENV: "${WP_ENV:-production}"
+      WP_DEBUG: "${WP_DEBUG:-false}"
+      WP_DEBUG_LOG: "${WP_DEBUG_LOG:-false}"
+      WP_DEBUG_DISPLAY: "${WP_DEBUG_DISPLAY:-false}"
+      
+    volumes:
+      - ./wordpress:/var/www/html:cached
+      - wp_uploads:/var/www/html/wp-content/uploads
+      - logs:/var/log/php
+      - ./config/php/php.ini:/usr/local/etc/php/php.ini:ro
+      - ./config/php/php-fpm.conf:/usr/local/etc/php-fpm.d/www.conf:ro
+    networks:
+      - onf_internal
+      - onf_web
+    healthcheck:
+      test: ["CMD-SHELL", "php-fpm-healthcheck || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: ${PHP_MAX_MEMORY:-1G}
+        reservations:
+          memory: 512M
+
+  # Nginx - High-performance web server with security headers
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx.prod
+    image: "onf-wp-nginx-prod:${COMPOSE_PROJECT_NAME}"
+    container_name: "${COMPOSE_PROJECT_NAME}_nginx"
+    restart: unless-stopped
+    depends_on:
+      php:
+        condition: service_healthy
+    environment:
+      NGINX_WORKER_PROCESSES: "${NGINX_WORKER_PROCESSES:-auto}"
+      NGINX_WORKER_CONNECTIONS: "${NGINX_WORKER_CONNECTIONS:-1024}"
+      NGINX_KEEPALIVE_TIMEOUT: "65"
+      NGINX_CLIENT_MAX_BODY_SIZE: "${NGINX_CLIENT_MAX_BODY_SIZE:-256m}"
+      NGINX_FASTCGI_CACHE_ENABLED: "${NGINX_CACHE_ENABLED:-true}"
+      PROJECT_DOMAIN: "${PROJECT_DOMAIN}"
+    volumes:
+      - ./wordpress:/var/www/html:cached
+      - wp_uploads:/var/www/html/wp-content/uploads
+      - logs:/var/log/nginx
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/nginx/security-headers.conf:/etc/nginx/conf.d/security-headers.conf:ro
+      - ./config/nginx/cache.conf:/etc/nginx/conf.d/cache.conf:ro
+    networks:
+      - onf_internal
+      - onf_web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=onf_web_${COMPOSE_PROJECT_NAME}"
+      
+      # HTTP Router with automatic HTTPS redirect
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_http.rule=Host(`${PROJECT_DOMAIN}`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_http.entrypoints=web"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_http.middlewares=${COMPOSE_PROJECT_NAME}_https_redirect"
+      
+      # HTTPS Router with SSL
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_https.rule=Host(`${PROJECT_DOMAIN}`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_https.entrypoints=websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_https.tls=true"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_https.tls.certresolver=${CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_nginx_https.service=${COMPOSE_PROJECT_NAME}_nginx_service"
+      
+      # Service definition
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}_nginx_service.loadbalancer.server.port=80"
+      
+      # Middlewares
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}_https_redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}_https_redirect.redirectscheme.permanent=true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # WP-CLI - Professional WordPress management
+  wpcli:
+    build:
+      context: .
+      dockerfile: Dockerfile.wpcli.prod
+    image: "onf-wp-wpcli-prod:${COMPOSE_PROJECT_NAME}"
+    container_name: "${COMPOSE_PROJECT_NAME}_wpcli"
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      php:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: mariadb
+      WORDPRESS_DB_NAME: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_USER: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_PASSWORD: "${DB_PASSWORD}"
+      WORDPRESS_TABLE_PREFIX: "wp_${COMPOSE_PROJECT_NAME//-/_}_"
+      REDIS_HOST: "redis"
+      WP_CLI_CACHE_DIR: "/var/cache/wp-cli"
+      WP_CLI_CONFIG_PATH: "/var/www/html/wp-cli.yml"
+    volumes:
+      - ./wordpress:/var/www/html
+      - wp_uploads:/var/www/html/wp-content/uploads
+      - ./config/wp-cli/wp-cli.yml:/var/www/html/wp-cli.yml:ro
+      - ./scripts:/opt/onf-wp/scripts:ro
+      - logs:/var/log/wp-cli
+    networks:
+      - onf_internal
+    command: ["tail", "-f", "/dev/null"]
+    healthcheck:
+      test: ["CMD", "wp", "core", "is-installed", "--allow-root", "--path=/var/www/html"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+
+  # Cron - Automated maintenance and optimization
+  crond:
+    build:
+      context: .
+      dockerfile: Dockerfile.crond.prod
+    image: "onf-wp-crond-prod:${COMPOSE_PROJECT_NAME}"
+    container_name: "${COMPOSE_PROJECT_NAME}_crond"
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      php:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: mariadb
+      WORDPRESS_DB_NAME: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_USER: "${COMPOSE_PROJECT_NAME}"
+      WORDPRESS_DB_PASSWORD: "${DB_PASSWORD}"
+      REDIS_HOST: "redis"
+      CRON_LOG_LEVEL: "${CRON_LOG_LEVEL:-info}"
+    volumes:
+      - ./wordpress:/var/www/html
+      - wp_uploads:/var/www/html/wp-content/uploads
+      - ./config/cron/crontab:/etc/cron.d/wordpress:ro
+      - ./scripts:/opt/onf-wp/scripts:ro
+      - logs:/var/log/cron
+    networks:
+      - onf_internal
+    command: ["crond", "-f", "-l", "2"]
+
+  # Traefik - Production-grade reverse proxy with Let's Encrypt
+  traefik:
+    image: traefik:v3.0
+    container_name: "${COMPOSE_PROJECT_NAME}_traefik"
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=${TRAEFIK_API_INSECURE:-false}"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=onf_web_${COMPOSE_PROJECT_NAME}"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}"
+      - "--log.level=${TRAEFIK_LOG_LEVEL:-INFO}"
+      - "--accesslog=true"
+      - "--accesslog.filepath=/var/log/traefik/access.log"
+      - "--log.filepath=/var/log/traefik/traefik.log"
+      - "--metrics.prometheus=true"
+    ports:
+      - "${TRAEFIK_HTTP_PORT:-80}:80"
+      - "${TRAEFIK_HTTPS_PORT:-443}:443"
+      - "${TRAEFIK_WEBUI_PORT:-8080}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data/letsencrypt:/letsencrypt
+      - logs:/var/log/traefik
+    networks:
+      - onf_web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.${PROJECT_DOMAIN}`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls=true"
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik.service=api@internal"
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Adminer - Secure database management
+  adminer:
+    image: adminer:4.8.1
+    container_name: "${COMPOSE_PROJECT_NAME}_adminer"
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: mariadb
+      ADMINER_DESIGN: "lucas"
+      ADMINER_PLUGINS: "tables-filter tinymce"
+    networks:
+      - onf_internal
+      - onf_web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=onf_web_${COMPOSE_PROJECT_NAME}"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_adminer.rule=Host(`db.${PROJECT_DOMAIN}`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_adminer.entrypoints=websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_adminer.tls=true"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_adminer.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_adminer.service=${COMPOSE_PROJECT_NAME}_adminer_service"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}_adminer_service.loadbalancer.server.port=8080"
+      # Security middleware for admin access
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}_adminer.middlewares=${COMPOSE_PROJECT_NAME}_admin_auth"
+      - "traefik.http.middlewares.${COMPOSE_PROJECT_NAME}_admin_auth.basicauth.users=${ADMIN_BASIC_AUTH}"
+
+  # Log Management - Centralized logging with rotation
+  logrotate:
+    image: alpine:3.19
+    container_name: "${COMPOSE_PROJECT_NAME}_logrotate"
+    restart: unless-stopped
+    volumes:
+      - logs:/var/log/app
+      - ./config/logrotate/logrotate.conf:/etc/logrotate.conf:ro
+    command: >
+      sh -c "
+        while true; do
+          logrotate -f /etc/logrotate.conf
+          sleep 3600
+        done
+      "
+    networks:
+      - onf_internal 
